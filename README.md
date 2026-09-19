@@ -15,6 +15,23 @@ App web de una sola página para seguir un plan de entrenamiento de triatlón ol
 Abre `index.html` con doble clic (Chrome, Edge o Firefox). Para tenerla a mano en el móvil,
 súbela a cualquier alojamiento estático y añádela a la pantalla de inicio.
 
+## Cómo se adapta a ti
+
+El plan no es fijo. De las marcas que metes en la pestaña **Marcas** (carreras y tests
+de 5 K, 400 y 200 m de natación, 20′ en bici) salen tus ritmos, tu CSS de natación y tu
+FTP, y con ellos cada sesión muestra a qué ritmo o a cuántos vatios hacerla. Cuando
+mejoras una marca, todas las prescripciones se recalculan solas.
+
+Además:
+
+- El **volumen de la semana siguiente** sube o baja según lo que hayas cumplido las
+  semanas anteriores, tu RPE medio, tus sensaciones y tus horas de sueño. Cada ajuste
+  se explica en la app; las semanas que ya han empezado no se tocan.
+- Los **metros seguidos** que toca intentar en el agua suben con tu récord.
+- En el **gimnasio**, si la última sesión de ese ejercicio la cerraste con RIR ≥ 2 en
+  todas las series, aparece el peso ya subido (2,5 kg, o 5 kg en los básicos de pierna).
+- Los **hitos** se marcan solos en cuanto los datos los cumplen.
+
 ## El plan
 
 30 semanas, del lunes 21/09/2026 al domingo 18/04/2027, en cuatro fases (Base,

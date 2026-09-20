@@ -465,7 +465,9 @@ function defaultDB(){
   return {
     version:1,
     settings:{ raceDate:DEFAULT_RACE, planStart:DEFAULT_START, theme:"auto", deloadPct:0.35,
-               raceName:"Triatlón olímpico" },
+               raceName:"Triatlón olímpico",
+               adaptVolume:true,      // ajusta los minutos según cómo vayas
+               adaptStructure:true }, // y también qué sesiones tocan
     templates: defaultTemplates(),
     planned:{},          // "YYYY-MM-DD" -> [sesión planificada]
     sessions:[],         // registros realizados
@@ -597,7 +599,8 @@ function weekTargetMin(w){
   const p = phaseOfWeek(w);
   if(!p) return 0;
   const meta = DB.weekMeta[w];
-  const f = meta && isFinite(Number(meta.k)) ? Number(meta.k) : weekFactor(w);
+  const guardado = meta ? Number(String(meta.k).split("|")[0]) : NaN;
+  const f = isFinite(guardado) ? guardado : weekFactor(w);
   return Math.round(p.hours * 60 * f);
 }
 
@@ -619,16 +622,19 @@ function genDay(dateISO){
 }
 function ensureWeek(w){
   let changed = false;
-  const key = weekFactor(w).toFixed(2);
+  const key = weekFactor(w).toFixed(2) + "|" + structuralPlan(w).sig;
   const meta = DB.weekMeta[w];
   /* si el ajuste ha cambiado y la semana todavía no ha empezado, se vuelve a generar */
   if(meta && meta.k !== key && iso(weekStart(w)) > todayISO()){
     for(let i=0;i<7;i++) delete DB.planned[iso(addDays(weekStart(w), i))];
     DB.weekMeta[w] = {k:key}; changed = true;
   }
-  for(let i=0;i<7;i++){
-    const k = iso(addDays(weekStart(w), i));
-    if(!(k in DB.planned)){ DB.planned[k] = genDay(k); changed = true; }
+  const faltan = [];
+  for(let i=0;i<7;i++){ if(!(iso(addDays(weekStart(w), i)) in DB.planned)) faltan.push(i); }
+  if(faltan.length){
+    const days = genWeek(w);
+    faltan.forEach(i => { DB.planned[iso(addDays(weekStart(w), i))] = days[i]; });
+    changed = true;
   }
   if(!DB.weekMeta[w]){ DB.weekMeta[w] = {k:key}; changed = true; }
   if(changed) save();
@@ -840,9 +846,17 @@ function adherence(w){
   const p = phaseOfWeek(w); if(!p) return null;
   const target = p.hours * 60 * baseFactor(w);
   if(!target) return null;
+  /* una semana sin nada registrado no significa que fallaras: significa que no hay datos */
+  if(!sessionsInWeek(w).length) return null;
   return doneMin(sessionsInWeek(w)) / target;
 }
 function mean(a){ return a.length ? a.reduce((x,y)=>x+y,0)/a.length : null; }
+/* las n últimas semanas ya terminadas antes de w (la semana en curso no cuenta) */
+function completedBefore(w, n){
+  const hoy = todayISO(), out = [];
+  for(let x = w-1; x >= 1 && out.length < n; x--) if(iso(weekEnd(x)) < hoy) out.push(x);
+  return out;
+}
 function last7(){
   const from = iso(addDays(new Date(), -7));
   return { ses:DB.sessions.filter(s => s.date >= from && s.status !== "skipped"),
@@ -850,8 +864,8 @@ function last7(){
 }
 function coachFactor(w){
   let f = 1; const why = [];
-  const today = todayISO();
-  const prev = [w-1, w-2].filter(x => x >= 1 && iso(weekEnd(x)) < today);
+  if(DB.settings.adaptVolume === false) return { f, why };
+  const prev = completedBefore(w, 2);
   const adh = prev.map(adherence).filter(x => x != null);
   if(adh.length){
     const a = mean(adh);
@@ -890,8 +904,12 @@ function coachAdvice(){
   if(!P.bike){
     out.push({k:"warn", t:"Añade un <b>test de 20′ en bici</b> en Marcas y te pongo los vatios de cada sesión."});
   }
-  const next = coachFactor(w + 1);
-  next.why.forEach(x => out.push(x));
+  coachFactor(w + 1).why.forEach(x => out.push(x));
+  structuralPlan(w + 1).why.forEach(x => out.push(x));
+  const nados = DB.sessions.filter(s => s.type === "swim" && s.status !== "skipped");
+  if(nados.length >= 3 && !nados.some(s => s.swim && s.swim.contMaxM > 0)){
+    out.push({k:"warn", t:"Apunta los <b>metros seguidos</b> en cada sesión de natación: es lo que uso para seguir tus hitos y decidir cuánto empujar."});
+  }
   const best = DB.sessions.filter(s => s.type==="swim" && s.swim && s.swim.contMaxM > 0);
   if(best.length){
     const b = Math.max(...best.map(s => s.swim.contMaxM));
@@ -899,6 +917,104 @@ function coachAdvice(){
     if(t > b) out.push({k:"good", t:"Tu récord nadando seguido está en <b>"+b+" m</b>. El próximo día toca intentar <b>"+t+" m</b>."});
   }
   return out;
+}
+
+/* --- ¿vas por detrás del próximo hito de natación? --- */
+function swimBehind(){
+  const targets = [{id:"m2", d:400}, {id:"m6", d:1000}, {id:"m8", d:1500}];
+  const nados = DB.sessions.filter(s => s.type === "swim" && s.status !== "skipped");
+  const conts = nados.filter(s => s.swim && s.swim.contMaxM > 0).map(s => s.swim.contMaxM);
+  if(nados.length < 3 || !conts.length) return null;   // todavía no hay con qué juzgar
+  const best = Math.max(...conts);
+  for(const t of targets){
+    const m = DB.milestones.find(x => x.id === t.id);
+    if(!m || m.done) continue;
+    const dias = daysBetween(new Date(), parseISO(m.target));
+    if(dias > 56 || dias < -60) return null;          // o queda mucho, o ya pasó de largo
+    return best < t.d*0.7 ? {best, target:t.d, date:m.target} : null;
+  }
+  return null;
+}
+
+/* --- ¿hay un día de la semana que nunca entrenas? --- */
+function deadDay(w){
+  const weeks = completedBefore(w, 3);
+  if(weeks.length < 3) return null;
+  for(let dow = 0; dow < 7; dow++){
+    let planned = 0, done = 0;
+    weeks.forEach(x => {
+      const d = iso(addDays(weekStart(x), dow));
+      const ps = (DB.planned[d]||[]).filter(pl => !pl.opt);
+      planned += ps.length;
+      done += ps.filter(pl => { const s = sessionByPlanned(pl.id); return s && s.status !== "skipped"; }).length;
+    });
+    if(planned >= 3 && done === 0){
+      const p = phaseOfWeek(w);
+      const busy = new Set((DB.templates[p.n]||[]).map(t => t.dow - 1));
+      let to = null;
+      for(let i = 0; i < 7; i++) if(!busy.has(i)){ to = i; break; }
+      return {from:dow, to};
+    }
+  }
+  return null;
+}
+
+/* --- qué sesiones cambio esta semana y por qué --- */
+function structuralPlan(w){
+  const ops = [], why = [];
+  if(DB.settings.adaptStructure === false) return {ops, why, sig:"off"};
+  const p = phaseOfWeek(w);
+  if(!p) return {ops, why, sig:""};
+  const prev = completedBefore(w, 2);
+  const adh = prev.map(adherence).filter(x => x != null);
+
+  if(adh.length && mean(adh) < 0.75){
+    ops.push({k:"dropOpt"});
+    why.push({k:"warn", t:"Quito las sesiones opcionales: con el ritmo que llevas, mejor asegurar las que de verdad importan."});
+  }
+  const sb = swimBehind();
+  if(sb && p.n <= 3 && !isDeload(w)){
+    ops.push({k:"addSwim", min: p.n === 1 ? 30 : 40});
+    why.push({k:"good", t:"Meto una sesión extra de <b>natación continua</b>: vas por "+(sb.best||0)+" m seguidos y el hito de <b>"+sb.target+" m</b> es el "+ddmm(sb.date)+"."});
+  }
+  const dd = deadDay(w);
+  if(dd){
+    if(dd.to != null){
+      ops.push({k:"move", from:dd.from, to:dd.to});
+      why.push({k:"warn", t:"Llevas tres semanas sin entrenar los <b>"+DOW[dd.from].toLowerCase()+"</b>: muevo esa sesión al "+DOW[dd.to].toLowerCase()+"."});
+    } else {
+      why.push({k:"warn", t:"Llevas tres semanas sin entrenar los <b>"+DOW[dd.from].toLowerCase()+"</b>. Si ese día no te encaja, cámbialo en la plantilla (Ajustes)."});
+    }
+  }
+  return {ops, why, sig: ops.map(o => o.k+(o.from ?? "")+(o.to ?? "")).join(",")};
+}
+
+/* --- la semana entera, con las mutaciones ya aplicadas --- */
+function genWeek(w){
+  const days = [];
+  for(let i = 0; i < 7; i++) days.push(genDay(iso(addDays(weekStart(w), i))));
+  const esCarrera = i => days[i].some(x => x.race);
+  structuralPlan(w).ops.forEach(op => {
+    if(op.k === "dropOpt"){
+      for(let i = 0; i < 7; i++) days[i] = days[i].filter(x => !x.opt);
+    }
+    if(op.k === "move" && !esCarrera(op.from) && !esCarrera(op.to)){
+      days[op.to] = days[op.to].concat(days[op.from].map(x => Object.assign({}, x, {auto:"movida"})));
+      days[op.from] = [];
+    }
+    if(op.k === "addSwim"){
+      let best = -1, bestLoad = Infinity;
+      for(let i = 0; i < 7; i++){
+        if(esCarrera(i) || days[i].some(x => x.type === "swim")) continue;
+        const load = days[i].reduce((t,x) => t + (x.opt ? x.min/2 : x.min), 0);
+        if(load < bestLoad){ bestLoad = load; best = i; }
+      }
+      if(best >= 0) days[best].push({ id:uid(), type:"swim", subtype:null, focus:"continuo",
+        title:"Natación continua (extra)", min:op.min, note:"La ha añadido el motor para empujar tu punto débil",
+        opt:false, phase:phaseOfWeek(w).n, week:w, auto:"añadida" });
+    }
+  });
+  return days;
 }
 
 /* --- los hitos se marcan solos en cuanto los datos los cumplen --- */
@@ -1039,6 +1155,7 @@ function sesCard(pl, s, dateISO, opts){
         '<span class="tiny t3 num">'+pl.min+"′"+'</span>'+
         (pl.opt ? '<span class="pill">opcional</span>' : "")+
         (pl.unplanned ? '<span class="pill acc">extra</span>' : "")+
+        (pl.auto ? '<span class="pill acc">'+esc(pl.auto)+' por el motor</span>' : "")+
       '</div>'+
       '<h3>'+esc(pl.title)+'</h3>'+
       (pl.note ? '<div class="meta">'+esc(pl.note)+'</div>' : "")+
@@ -1058,7 +1175,7 @@ function coachPanel(items, title){
   if(!items.length) return "";
   const ic = {good:"📈", warn:"⚠️", bad:"⚠️"};
   return '<div class="coach"><h3>◆ '+(title||"Tu entrenador")+'</h3><ul>'+
-    items.slice(0,4).map(x => '<li>'+(ic[x.k]||"")+' '+x.t+'</li>').join("")+'</ul></div>';
+    items.slice(0,5).map(x => '<li>'+(ic[x.k]||"")+' '+x.t+'</li>').join("")+'</ul></div>';
 }
 function viewHoy(){
   const d = state.day, dd = parseISO(d);
@@ -1497,8 +1614,9 @@ function viewWeek(){
   '</div>';
 
   const futura = iso(weekStart(w)) > todayISO();
-  const cf = coachFactor(futura ? w : w+1);
-  h += coachPanel(cf.why, futura ? "Ajuste aplicado a esta semana" : "Ajuste para la semana que viene");
+  const wRef = futura ? w : w+1;
+  h += coachPanel(coachFactor(wRef).why.concat(structuralPlan(wRef).why),
+                  futura ? "Ajuste aplicado a esta semana" : "Ajuste para la semana que viene");
 
   h += '<div class="wk">';
   for(let i=0;i<7;i++){
@@ -1511,7 +1629,7 @@ function viewWeek(){
     plan.forEach(pl => {
       const s = sessionByPlanned(pl.id);
       const cls = s ? (s.status==="skipped" ? "skipped" : "done") : "";
-      h += '<div class="mini '+TYPES[pl.type].css+' '+cls+'"><div class="t">'+esc(pl.title)+'</div>'+
+      h += '<div class="mini '+TYPES[pl.type].css+' '+cls+'"><div class="t">'+esc(pl.title)+(pl.auto?' ◆':"")+'</div>'+
            '<div class="num" style="opacity:.75">'+pl.min+'′'+(s&&s.durationMin&&s.status!=="skipped"&&s.durationMin!==pl.min?" → "+s.durationMin+"′":"")+'</div></div>';
     });
     extras.forEach(s => {
@@ -1960,6 +2078,22 @@ function viewSettings(){
       (()=>{const a=[];for(let w=1;w<=totalWeeks();w++) if(isDeload(w)) a.push(w); return a.join(", ")||"—";})()+'</div>'+
   '</div></div>';
 
+  const sw = (f, lab, desc) => {
+    const on = st[f] !== false;
+    return '<div class="row" style="justify-content:space-between;gap:14px;padding:11px 0;border-top:1px solid var(--line)">'+
+      '<div style="min-width:0"><div style="font-weight:600;font-size:14px">'+lab+'</div>'+
+      '<div class="tiny t3">'+desc+'</div></div>'+
+      '<button class="btn sm '+(on?"primary":"")+'" data-act="toggle" data-f="'+f+'" style="flex:none;min-width:74px">'+
+        (on?"activado":"apagado")+'</button></div>';
+  };
+  h += '<div class="sec"><h2>Cómo se adapta el plan</h2><div class="card pad" style="padding-top:4px">'+
+    sw("adaptVolume","Ajustar el volumen",
+       "Sube o baja los minutos de la semana que viene según lo que cumplas, tu RPE, tus sensaciones y tu sueño.")+
+    sw("adaptStructure","Ajustar las sesiones",
+       "Quita las opcionales si vas justo, añade natación si vas por detrás del hito y mueve el día que nunca entrenas.")+
+    '<div class="tiny t3" style="margin-top:11px">Los cambios solo entran en semanas que todavía no han empezado, y siempre se explican en Hoy y en Semana.</div>'+
+  '</div></div>';
+
   h += '<div class="sec"><h2>Plantilla de la semana por fase</h2>'+
     '<div class="row wrap" style="gap:6px;margin-bottom:10px">'+
       PHASES.map(p=>'<button class="btn sm'+(p.n===ph?" primary":"")+'" data-act="tpl-phase" data-p="'+p.n+'">Fase '+p.n+' · '+p.name+'</button>').join("")+
@@ -2130,6 +2264,11 @@ document.addEventListener("click", e => {
     case "import":    importJSON(); break;
     case "wipe":      wipe(); break;
     case "theme-set": DB.settings.theme = d.t; save(); applyTheme(); render(); break;
+    case "toggle":
+      DB.settings[d.f] = DB.settings[d.f] === false;
+      save(); render();
+      toast((DB.settings[d.f] ? "Activado" : "Apagado")+" · afecta a las semanas que aún no han empezado");
+      break;
   }
 });
 document.addEventListener("change", e => {

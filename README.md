@@ -31,6 +31,14 @@ Además:
 - En el **gimnasio**, si la última sesión de ese ejercicio la cerraste con RIR ≥ 2 en
   todas las series, aparece el peso ya subido (2,5 kg, o 5 kg en los básicos de pierna).
 - Los **hitos** se marcan solos en cuanto los datos los cumplen.
+- Y también cambia **qué sesiones** tocan: quita las opcionales si llevas dos semanas
+  por debajo del 75 %, añade una sesión de natación continua si vas por detrás del
+  próximo hito de natación, y mueve de día una sesión que lleves tres semanas
+  saltándote (si hay hueco libre en la plantilla; si no, te lo dice).
+
+Nada de esto se aplica sin datos: una semana sin nada registrado cuenta como «no sé»,
+no como un cero. Los dos motores —volumen y sesiones— se apagan por separado en
+*Ajustes*, y los cambios solo entran en semanas que todavía no han empezado.
 
 ## El plan
 
